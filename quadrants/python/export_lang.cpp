@@ -353,7 +353,8 @@ void export_lang(py::module &m) {
       .def("finalize", &Program::finalize)
       .def("get_total_compilation_time", &Program::get_total_compilation_time)
       .def("get_snode_num_dynamically_allocated", &Program::get_snode_num_dynamically_allocated)
-      .def("synchronize", &Program::synchronize_and_assert)
+      .def("synchronize", &Program::synchronize_and_assert,
+           py::call_guard<py::gil_scoped_release>())
       .def("materialize_runtime", &Program::materialize_runtime)
       .def("get_snode_tree_size", &Program::get_snode_tree_size)
       .def("get_snode_root", &Program::get_snode_root, py::return_value_policy::reference)
@@ -405,8 +406,10 @@ void export_lang(py::module &m) {
       .def("fill_uint",
            [](Program *program, Ndarray *ndarray, uint32_t val) { program->fill_ndarray_fast_u32(ndarray, val); })
       .def("get_graphics_device", [](Program *program) { return program->get_graphics_device(); })
-      .def("compile_kernel", &Program::compile_kernel, py::return_value_policy::reference)
-      .def("launch_kernel", &Program::launch_kernel)
+      .def("compile_kernel", &Program::compile_kernel, py::return_value_policy::reference,
+           py::call_guard<py::gil_scoped_release>())
+      .def("launch_kernel", &Program::launch_kernel,
+           py::call_guard<py::gil_scoped_release>())
       .def("get_device_caps", &Program::get_device_caps)
       .def("get_graph_cache_size", &Program::get_graph_cache_size)
       .def("get_graph_cache_used_on_last_call", &Program::get_graph_cache_used_on_last_call)
@@ -532,7 +535,8 @@ void export_lang(py::module &m) {
       .def("insert_ret", &Kernel::insert_ret)
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
-      .def("make_launch_context", &Kernel::make_launch_context)
+      .def("make_launch_context", &Kernel::make_launch_context,
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "ast_builder", [](Kernel *self) -> ASTBuilder * { return &self->context->builder(); },
           py::return_value_policy::reference);
