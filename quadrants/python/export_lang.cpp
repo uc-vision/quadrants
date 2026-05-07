@@ -541,25 +541,48 @@ void export_lang(py::module &m) {
           "ast_builder", [](Kernel *self) -> ASTBuilder * { return &self->context->builder(); },
           py::return_value_policy::reference);
 
+  // Release the GIL on every LaunchContextBuilder setter / getter — these
+  // run after pybind11 has converted Python args to C++ types and don't
+  // touch Python state, so multi-threaded dispatchers can interleave arg
+  // setup. Per-kernel dispatch in lang/kernel.py loops over many of these
+  // calls; without the guard, threaded callers serialise on the GIL here.
   py::class_<LaunchContextBuilder>(m, "KernelLaunchContext")
-      .def("copy", &LaunchContextBuilder::copy)
-      .def("set_arg_int", &LaunchContextBuilder::set_arg_int)
-      .def("set_args_int", &LaunchContextBuilder::set_args_int)
-      .def("set_arg_uint", &LaunchContextBuilder::set_arg_uint)
-      .def("set_args_uint", &LaunchContextBuilder::set_args_uint)
-      .def("set_arg_float", &LaunchContextBuilder::set_arg_float)
-      .def("set_args_float", &LaunchContextBuilder::set_args_float)
-      .def("set_struct_arg_int", &LaunchContextBuilder::set_struct_arg<int64>)
-      .def("set_struct_arg_uint", &LaunchContextBuilder::set_struct_arg<uint64>)
-      .def("set_struct_arg_float", &LaunchContextBuilder::set_struct_arg<double>)
-      .def("set_arg_external_array_with_shape", &LaunchContextBuilder::set_arg_external_array_with_shape)
-      .def("set_arg_ndarray", &LaunchContextBuilder::set_arg_ndarray)
-      .def("set_args_ndarray", &LaunchContextBuilder::set_args_ndarray)
-      .def("set_arg_ndarray_with_grad", &LaunchContextBuilder::set_arg_ndarray_with_grad)
-      .def("set_args_ndarray_with_grad", &LaunchContextBuilder::set_args_ndarray_with_grad)
-      .def("get_struct_ret_int", &LaunchContextBuilder::get_struct_ret_int)
-      .def("get_struct_ret_uint", &LaunchContextBuilder::get_struct_ret_uint)
-      .def("get_struct_ret_float", &LaunchContextBuilder::get_struct_ret_float)
+      .def("copy", &LaunchContextBuilder::copy,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_int", &LaunchContextBuilder::set_arg_int,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_args_int", &LaunchContextBuilder::set_args_int,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_uint", &LaunchContextBuilder::set_arg_uint,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_args_uint", &LaunchContextBuilder::set_args_uint,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_float", &LaunchContextBuilder::set_arg_float,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_args_float", &LaunchContextBuilder::set_args_float,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_struct_arg_int", &LaunchContextBuilder::set_struct_arg<int64>,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_struct_arg_uint", &LaunchContextBuilder::set_struct_arg<uint64>,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_struct_arg_float", &LaunchContextBuilder::set_struct_arg<double>,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_external_array_with_shape", &LaunchContextBuilder::set_arg_external_array_with_shape,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_ndarray", &LaunchContextBuilder::set_arg_ndarray,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_args_ndarray", &LaunchContextBuilder::set_args_ndarray,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_arg_ndarray_with_grad", &LaunchContextBuilder::set_arg_ndarray_with_grad,
+           py::call_guard<py::gil_scoped_release>())
+      .def("set_args_ndarray_with_grad", &LaunchContextBuilder::set_args_ndarray_with_grad,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_struct_ret_int", &LaunchContextBuilder::get_struct_ret_int,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_struct_ret_uint", &LaunchContextBuilder::get_struct_ret_uint,
+           py::call_guard<py::gil_scoped_release>())
+      .def("get_struct_ret_float", &LaunchContextBuilder::get_struct_ret_float,
+           py::call_guard<py::gil_scoped_release>())
       .def_readwrite("use_graph", &LaunchContextBuilder::use_graph)
       .def_readwrite("graph_do_while_arg_id", &LaunchContextBuilder::graph_do_while_arg_id);
 
