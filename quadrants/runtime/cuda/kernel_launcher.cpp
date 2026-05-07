@@ -432,9 +432,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {
       executor->deallocate_memory_on_device(itr->second.second);
     }
-  } else if (ctx.result_buffer_size > 0) {
-    CUDADriver::get_instance().stream_synchronize(active_stream);
   }
+  // No eager sync for the host `result_buffer` DtoH copy: the only
+  // consumers (LlvmRuntimeExecutor::fetch_result_uint64 / check_runtime_error)
+  // call synchronize() themselves before reading. Letting launch_kernel
+  // return as soon as kernels are queued is what unlocks CPU-side
+  // dispatch parallelism for multi-stream callers.
 }
 
 KernelLauncher::~KernelLauncher() {
