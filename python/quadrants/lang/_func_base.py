@@ -58,6 +58,7 @@ from quadrants.types import (
 )
 
 from ._exceptions import raise_exception
+from ._external_tensor import TORCH_TENSOR_TYPE
 from .ast.ast_transformer_utils import ASTTransformerGlobalContext
 
 if TYPE_CHECKING:
@@ -735,6 +736,26 @@ class FuncBase:
             else:
                 element_dim = needed_arg_dtype.ndim
                 array_shape = v.shape[element_dim:] if is_soa else v.shape[:-element_dim]
+            if (
+                type(v) is TORCH_TENSOR_TYPE
+                and v.device.type == "cuda"
+                and not v.requires_grad
+                and v.grad is None
+                and impl.current_cfg().arch == _arch_cuda
+            ):
+                if not v.is_contiguous():
+                    raise ValueError(
+                        "Non contiguous tensors are not supported, please call tensor.contiguous() before "
+                        "passing it into quadrants kernel."
+                    )
+                launch_ctx.set_arg_external_array_with_shape(
+                    index,
+                    int(v.data_ptr()),
+                    v.element_size() * v.nelement(),
+                    array_shape,
+                    0,
+                )
+                return 1, False
             if isinstance(v, np.ndarray):
                 # Check ndarray flags is expensive (~250ns), so it is important to order branches according to hit stats
                 if v.flags.c_contiguous:

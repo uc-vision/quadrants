@@ -5,10 +5,15 @@ from weakref import ReferenceType
 from quadrants.lang import impl
 from quadrants.lang.impl import Program
 from quadrants.lang.kernel_arguments import ArgMetadata
+from quadrants.lang.matrix import MatrixType
 from quadrants.lang.util import is_data_oriented
+from quadrants.types import ndarray_type
 
 from .._test_tools import warnings_helper
-from ._kernel_types import ArgsHash
+from ._external_tensor import (
+    TORCH_TENSOR_TYPE,
+    ExternalTensorSpecializationSlot,
+)
 from ._template_mapper_hotpath import (
     _extract_arg,
     _primitive_types,
@@ -65,9 +70,26 @@ class TemplateMapper:
         self.num_args: int = len(arguments)
         self.template_slot_locations: list[int] = template_slot_locations
         self.mapping: dict[Key, int] = {}
-        self._mapping_cache: dict[ArgsHash, tuple[int, Key]] = {}
-        self._mapping_cache_tracker: dict[ArgsHash, list[ReferenceType | None]] = {}
+        self._mapping_cache: dict[Key, tuple[int, Key]] = {}
+        self._mapping_cache_tracker: dict[Key, list[ReferenceType | None]] = {}
         self._prog_weakref: ReferenceType[Program] | None = None
+        external_tensor_specialization_slots: list[ExternalTensorSpecializationSlot] = []
+        for argument_index, argument in enumerate(arguments):
+            annotation = argument.annotation
+            if type(annotation) is not ndarray_type.NdarrayType:
+                continue
+            element_dimensions = annotation.dtype.ndim if isinstance(annotation.dtype, MatrixType) else 0
+            external_tensor_specialization_slots.append(
+                ExternalTensorSpecializationSlot(
+                    argument_index=argument_index,
+                    element_dimensions=element_dimensions,
+                    infer_grad_requirement=annotation.needs_grad is None,
+                )
+            )
+        self._external_tensor_specialization_slots = tuple(external_tensor_specialization_slots)
+        self._external_tensor_specialization_locations = frozenset(
+            slot.argument_index for slot in external_tensor_specialization_slots
+        )
 
     def extract(self, raise_on_templated_floats: bool, args: tuple[Any, ...]) -> Key:
         return tuple(
@@ -97,7 +119,25 @@ class TemplateMapper:
         # extra effort is made to do otherwise (this behavior is referring to as "interning"). Avoiding special
         # branching for primitive types dramatically improve performance of hash computation.
         mapping_cache_tracker: list[ReferenceType | None] | None = None
-        args_hash: ArgsHash = tuple([id(arg) for arg in args])
+        # Direct torch tensors specialize kernels by dtype, logical dimensions, inferred gradient requirement, and
+        # matrix element shape. Those are the only tensor values consumed by ``extract``. Using them here allows a new
+        # tensor allocation with the same specialization to reuse the cached feature tuple, while mutations that affect
+        # compilation produce a new cache entry. Storage and launch bindings remain intentionally absent from this key.
+        args_hash_values: list[Any] = [id(arg) for arg in args]
+        for slot in self._external_tensor_specialization_slots:
+            arg = args[slot.argument_index]
+            if type(arg) is not TORCH_TENSOR_TYPE:
+                continue
+            shape = arg.shape
+            element_dimensions = slot.element_dimensions
+            element_shape = tuple(shape[-element_dimensions:]) if element_dimensions else ()
+            args_hash_values[slot.argument_index] = (
+                arg.dtype,
+                len(shape) - element_dimensions,
+                arg.requires_grad if slot.infer_grad_requirement else None,
+                element_shape,
+            )
+        args_hash: Key = tuple(args_hash_values)
         # ``@qd.data_oriented`` containers can have their member ndarrays reassigned between calls on the same instance
         # (``state.x = other_ndarray``). The id(arg) alone does not capture that, so the spec-key cache below would
         # serve a stale entry and the new ndarray's dtype/ndim would be wrong. Fold the reachable ndarray ids into the
@@ -159,7 +199,13 @@ class TemplateMapper:
             # these arguments to track the lifetime of the corresponding cache entry and taking weakref of primitive
             # types if forbidden anyway.
             mapping_cache_tracker_ += [
-                ReferenceType(arg, _evict_callback) for arg in args if type(arg) not in _primitive_types
+                ReferenceType(arg, _evict_callback)
+                for argument_index, arg in enumerate(args)
+                if type(arg) not in _primitive_types
+                and not (
+                    argument_index in self._external_tensor_specialization_locations
+                    and type(arg) is TORCH_TENSOR_TYPE
+                )
             ]
             self._mapping_cache_tracker[args_hash] = mapping_cache_tracker_
             self._mapping_cache[args_hash] = (count, key)
