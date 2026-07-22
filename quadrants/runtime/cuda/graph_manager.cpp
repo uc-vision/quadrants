@@ -1,14 +1,56 @@
 #include "quadrants/runtime/cuda/graph_manager.h"
 #include "quadrants/runtime/cuda/graph_do_while_cond_fatbin.h"
+#include "quadrants/runtime/cuda/graph_launch_state_fatbin.h"
 #include "quadrants/runtime/cuda/cuda_utils.h"
 #include "quadrants/rhi/cuda/cuda_context.h"
 
+#include <algorithm>
 #include <climits>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 
 namespace quadrants::lang {
 namespace cuda {
+
+namespace {
+
+constexpr std::size_t kLaunchWriteSize = sizeof(std::uint64_t);
+
+void append_launch_destination(CachedGraph &cached, void *destination) {
+  if (cached.launch_states.empty() || cached.launch_states.back().count == kGraphLaunchWriteCapacity) {
+    cached.launch_states.push_back({});
+  }
+  auto &state = cached.launch_states.back();
+  state.writes[state.count++].address = reinterpret_cast<std::uint64_t>(destination);
+}
+
+void set_launch_value(CachedGraph &cached, std::size_t index, std::uint64_t value) {
+  auto state = index / kGraphLaunchWriteCapacity;
+  auto write = index % kGraphLaunchWriteCapacity;
+  cached.launch_states[state].writes[write].value = value;
+}
+
+std::uint64_t launch_word(const void *source, std::size_t size) {
+  std::uint64_t value = 0;
+  std::memcpy(&value, source, size);
+  return value;
+}
+
+CudaKernelNodeParams launch_state_params(void *function, void **kernel_params) {
+  CudaKernelNodeParams params{};
+  params.func = function;
+  params.gridDimX = 1;
+  params.gridDimY = 1;
+  params.gridDimZ = 1;
+  params.blockDimX = kGraphLaunchWriteCapacity;
+  params.blockDimY = 1;
+  params.blockDimZ = 1;
+  params.kernelParams = kernel_params;
+  return params;
+}
+
+}  // namespace
 
 CachedGraph::CachedGraph(std::size_t arg_buf_size,
                          std::size_t result_buf_size,
@@ -21,7 +63,8 @@ CachedGraph::CachedGraph(std::size_t arg_buf_size,
                                     std::max(result_buffer_size, sizeof(uint64)));
 
   if (arg_buffer_size > 0) {
-    CUDADriver::get_instance().malloc((void **)&persistent_device_arg_buffer, arg_buffer_size);
+    const std::size_t capacity = (arg_buffer_size + kLaunchWriteSize - 1) / kLaunchWriteSize * kLaunchWriteSize;
+    CUDADriver::get_instance().malloc((void **)&persistent_device_arg_buffer, capacity);
   }
 
   if (num_graph_do_while_levels > 0) {
@@ -38,20 +81,16 @@ CachedGraph::CachedGraph(std::size_t arg_buf_size,
   }
 
   if (needs_resume_point_slot) {
-    // One int32 device scalar that the checkpoint gate kernels read every launch. Zero-init matches "no resume in
-    // progress" -- every gate sees `cp_id >= 0` and enables its body.
-    CUDADriver::get_instance().malloc(&resume_point_dev_ptr, sizeof(int32_t));
-    int32_t zero = 0;
-    CUDADriver::get_instance().memcpy_host_to_device(resume_point_dev_ptr, &zero, sizeof(int32_t));
+    // One int32 device scalar that the checkpoint gate kernels read every launch. Its allocation is padded so the
+    // graph-root state upload can publish it with one aligned uint64 store.
+    CUDADriver::get_instance().malloc(&resume_point_dev_ptr, kLaunchWriteSize);
   }
 
   if (needs_yield_signal_slot) {
     // Single int32 yield_signal device scalar. -1 means "no checkpoint has yielded this launch". The yield-check kernel
     // atomically CASes the first yielding cp_id in; `launch_cached_graph` resets it to -1 before every launch and
     // copies it back after.
-    CUDADriver::get_instance().malloc(&yield_signal_dev_ptr, sizeof(int32_t));
-    int32_t neg_one = -1;
-    CUDADriver::get_instance().memcpy_host_to_device(yield_signal_dev_ptr, &neg_one, sizeof(int32_t));
+    CUDADriver::get_instance().malloc(&yield_signal_dev_ptr, kLaunchWriteSize);
   }
 
   persistent_ctx.runtime = executor->get_llvm_runtime();
@@ -70,6 +109,9 @@ CachedGraph::CachedGraph(std::size_t arg_buf_size,
 CachedGraph::~CachedGraph() {
   if (graph_exec) {
     CUDADriver::get_instance().graph_exec_destroy(graph_exec);
+  }
+  if (graph) {
+    CUDADriver::get_instance().graph_destroy(graph);
   }
   if (persistent_device_arg_buffer) {
     CUDADriver::get_instance().mem_free(persistent_device_arg_buffer);
@@ -102,12 +144,15 @@ CachedGraph::~CachedGraph() {
 }
 
 CachedGraph::CachedGraph(CachedGraph &&other) noexcept
-    : graph_exec(other.graph_exec),
+    : graph(other.graph),
+      graph_exec(other.graph_exec),
       persistent_device_arg_buffer(other.persistent_device_arg_buffer),
       persistent_device_result_buffer(other.persistent_device_result_buffer),
       persistent_ctx(other.persistent_ctx),
       arg_buffer_size(other.arg_buffer_size),
       result_buffer_size(other.result_buffer_size),
+      launch_states(std::move(other.launch_states)),
+      launch_state_nodes(std::move(other.launch_state_nodes)),
       counter_ptr_slots(std::move(other.counter_ptr_slots)),
       const_one_dev(other.const_one_dev),
       const_one_slot(other.const_one_slot),
@@ -116,6 +161,7 @@ CachedGraph::CachedGraph(CachedGraph &&other) noexcept
       checkpoint_yield_on_ptr_slots(std::move(other.checkpoint_yield_on_ptr_slots)),
       num_checkpoints(other.num_checkpoints),
       num_nodes(other.num_nodes) {
+  other.graph = nullptr;
   other.graph_exec = nullptr;
   other.persistent_device_arg_buffer = nullptr;
   other.persistent_device_result_buffer = nullptr;
@@ -131,12 +177,15 @@ CachedGraph &CachedGraph::operator=(CachedGraph &&other) noexcept {
   // Move-and-swap: after the swaps, `raii_guard` holds our old resources and
   // its destructor frees them, so every owned pointer is released uniformly.
   CachedGraph raii_guard(std::move(other));
+  std::swap(graph, raii_guard.graph);
   std::swap(graph_exec, raii_guard.graph_exec);
   std::swap(persistent_device_arg_buffer, raii_guard.persistent_device_arg_buffer);
   std::swap(persistent_device_result_buffer, raii_guard.persistent_device_result_buffer);
   std::swap(persistent_ctx, raii_guard.persistent_ctx);
   std::swap(arg_buffer_size, raii_guard.arg_buffer_size);
   std::swap(result_buffer_size, raii_guard.result_buffer_size);
+  std::swap(launch_states, raii_guard.launch_states);
+  std::swap(launch_state_nodes, raii_guard.launch_state_nodes);
   std::swap(counter_ptr_slots, raii_guard.counter_ptr_slots);
   std::swap(const_one_dev, raii_guard.const_one_dev);
   std::swap(const_one_slot, raii_guard.const_one_slot);
@@ -234,6 +283,26 @@ uint32_t GraphManager::load_first_matching_fatbin(const unsigned char *const *fa
     }
   }
   return ret;
+}
+
+void GraphManager::ensure_launch_state_kernel_loaded() {
+  if (launch_state_kernel_func_)
+    return;
+
+  static_assert(kGraphLaunchStateFatbinCount > 0,
+                "Graph launch state fatbin table is empty -- regenerate with "
+                "scripts/build_graph_launch_state_fatbin.py");
+
+  auto &driver = CUDADriver::get_instance();
+  uint32_t ret =
+      load_first_matching_fatbin(kGraphLaunchStateFatbins, kGraphLaunchStateFatbinCount, &launch_state_kernel_module_);
+  QD_ERROR_IF(ret != CUDA_SUCCESS,
+              "Failed to load graph launch state kernel fatbin (CUDA error {}). "
+              "This SM ({}) may not be included in the fatbins -- regenerate with "
+              "scripts/build_graph_launch_state_fatbin.py",
+              ret, CUDAContext::get_instance().get_compute_capability());
+
+  driver.module_get_function(&launch_state_kernel_func_, launch_state_kernel_module_, "_qd_graph_launch_state_upload");
 }
 
 // Loads the graph_do_while condition kernel from the pre-built fatbins. The fatbins are generated by
@@ -377,6 +446,7 @@ int child_of(int parent_id, int descendant, const std::vector<GraphDoWhileLevel>
 
 void GraphManager::build_level(int parent_id,
                                void *target_graph,
+                               void *prev_node,
                                int begin,
                                int end,
                                const std::vector<OffloadedTask> &tasks,
@@ -388,7 +458,6 @@ void GraphManager::build_level(int parent_id,
   // A yield-bearing kernel (has_yield) wires every loop level's condition kernel to the cond-with-yield variant, so a
   // yield raised inside any checkpoint exits this and every enclosing WHILE loop.
   const bool has_yield = (cached.yield_signal_dev_ptr != nullptr);
-  void *prev_node = nullptr;
   int cursor = begin;
   while (cursor < end) {
     const int task_level = tasks[cursor].graph_do_while_level_id;
@@ -414,7 +483,8 @@ void GraphManager::build_level(int parent_id,
       void *child_body = nullptr;
       void *cond_node = add_conditional_while_node(target_graph, prev_node, cond_handles[child], &child_body);
       ++total_nodes;
-      build_level(child, child_body, cursor, run_end, tasks, levels, cond_handles, cuda_module, cached, total_nodes);
+      build_level(child, child_body, nullptr, cursor, run_end, tasks, levels, cond_handles, cuda_module, cached,
+                  total_nodes);
       // Subsequent siblings in this body depend on the conditional node.
       prev_node = cond_node;
       cursor = run_end;
@@ -584,15 +654,25 @@ void GraphManager::build_level(int parent_id,
 }
 
 bool GraphManager::launch_cached_graph(CachedGraph &cached, LaunchContextBuilder &ctx, bool use_graph_do_while) {
-  // TODO: these memcpy_host_to_device calls could be async (cuMemcpyHtoDAsync) on the launch stream for better CPU-GPU
-  // overlap. All are tiny (<= 8 bytes), so synchronous is fine for now.
+  auto *stream = CUDAContext::get_instance().get_stream();
+  auto &driver = CUDADriver::get_instance();
+
+  std::size_t write_index = 0;
+  if (cached.arg_buffer_size > 0) {
+    auto *source = static_cast<const char *>(ctx.get_context().arg_buffer);
+    for (std::size_t offset = 0; offset < cached.arg_buffer_size; offset += kLaunchWriteSize) {
+      set_launch_value(cached, write_index++,
+                       launch_word(source + offset, std::min(kLaunchWriteSize, cached.arg_buffer_size - offset)));
+    }
+  }
+
   if (use_graph_do_while) {
     // Refresh every level's indirection slot with this launch's resolved condition ndarray pointer, so swapping any
     // level's counter ndarray between launches works without a rebuild.
     QD_ASSERT(cached.counter_ptr_slots.size() == ctx.graph_do_while_levels.size());
     for (size_t level = 0; level < ctx.graph_do_while_levels.size(); level++) {
       void *flag_ptr = ctx.graph_do_while_levels[level].flag_dev_ptr;
-      CUDADriver::get_instance().memcpy_host_to_device(cached.counter_ptr_slots[level], &flag_ptr, sizeof(void *));
+      set_launch_value(cached, write_index++, reinterpret_cast<std::uint64_t>(flag_ptr));
     }
   }
 
@@ -602,35 +682,40 @@ bool GraphManager::launch_cached_graph(CachedGraph &cached, LaunchContextBuilder
     // from_checkpoint=cp)` and gates skip every cp_id strictly below it. The yield-check kernel may bump this to
     // INT_MAX mid-launch; the reset here ensures the next launch starts from a clean baseline.
     int32_t rp = (ctx.resume_from_checkpoint < 0) ? 0 : ctx.resume_from_checkpoint;
-    CUDADriver::get_instance().memcpy_host_to_device(cached.resume_point_dev_ptr, &rp, sizeof(int32_t));
+    set_launch_value(cached, write_index++, static_cast<std::uint32_t>(rp));
   }
 
   if (cached.yield_signal_dev_ptr) {
     // Slice 1d: reset yield_signal to -1 before each launch so the yield-check kernel sees a clean "no yield yet this
     // launch" state. The first cp_id whose yield_on fires will CAS its value in; later yields are no-ops thanks to
     // atomicCAS semantics.
-    int32_t neg_one = -1;
-    CUDADriver::get_instance().memcpy_host_to_device(cached.yield_signal_dev_ptr, &neg_one, sizeof(int32_t));
+    set_launch_value(cached, write_index++, static_cast<std::uint32_t>(-1));
   }
 
   // For each `qd.checkpoint(yield_on=foo)` with a resolved device pointer this launch, refresh the persistent
   // indirection slot. Re-runs are cheap and unconditional so a user can pass a different ndarray each call without
   // invalidating the cached graph (same trick as `counter_ptr_slots` for graph_do_while).
-  for (std::size_t cp = 0;
-       cp < cached.checkpoint_yield_on_ptr_slots.size() && cp < ctx.checkpoint_yield_on_dev_ptrs.size(); ++cp) {
+  for (std::size_t cp = 0; cp < cached.checkpoint_yield_on_ptr_slots.size(); ++cp) {
     void *slot = cached.checkpoint_yield_on_ptr_slots[cp];
-    void *user_ptr = ctx.checkpoint_yield_on_dev_ptrs[cp];
-    if (slot && user_ptr) {
-      CUDADriver::get_instance().memcpy_host_to_device(slot, &user_ptr, sizeof(void *));
+    if (slot) {
+      set_launch_value(cached, write_index++, reinterpret_cast<std::uint64_t>(ctx.checkpoint_yield_on_dev_ptrs[cp]));
     }
   }
 
-  if (ctx.arg_buffer_size > 0) {
-    CUDADriver::get_instance().memcpy_host_to_device(cached.persistent_device_arg_buffer, ctx.get_context().arg_buffer,
-                                                     cached.arg_buffer_size);
+  std::size_t expected_writes = 0;
+  for (const auto &state : cached.launch_states) {
+    expected_writes += state.count;
   }
-  auto *stream = CUDAContext::get_instance().get_stream();
-  CUDADriver::get_instance().graph_launch(cached.graph_exec, stream);
+  QD_ASSERT(write_index == expected_writes);
+
+  QD_ASSERT(cached.launch_states.size() == cached.launch_state_nodes.size());
+  for (std::size_t block = 0; block < cached.launch_states.size(); ++block) {
+    void *kernel_params[] = {&cached.launch_states[block]};
+    auto params = launch_state_params(launch_state_kernel_func_, kernel_params);
+    driver.graph_exec_kernel_node_set_params(cached.graph_exec, cached.launch_state_nodes[block], &params);
+  }
+
+  driver.graph_launch(cached.graph_exec, stream);
 
   // Capture the post-launch yield_signal so introspection (and slice 2's GraphStatus) can see which cp_id yielded. The
   // sync is heavy-handed but matches the rest of the launch path, which has been sync-by-default since
@@ -638,9 +723,9 @@ bool GraphManager::launch_cached_graph(CachedGraph &cached, LaunchContextBuilder
   // semantics.
   last_yield_cp_id_on_last_call_ = -1;
   if (cached.yield_signal_dev_ptr) {
-    CUDADriver::get_instance().stream_synchronize(stream);
+    driver.stream_synchronize(stream);
     int32_t signal = -1;
-    CUDADriver::get_instance().memcpy_device_to_host(&signal, cached.yield_signal_dev_ptr, sizeof(int32_t));
+    driver.memcpy_device_to_host(&signal, cached.yield_signal_dev_ptr, sizeof(int32_t));
     last_yield_cp_id_on_last_call_ = signal;
   }
 
@@ -684,9 +769,9 @@ bool GraphManager::try_launch(int launch_id,
 
   resolve_ctx_ndarray_ptrs(ctx, parameters, executor);
 
-  auto it = cache_.find(launch_id);
-  if (it != cache_.end()) {
-    return launch_cached_graph(it->second, ctx, use_graph_do_while);
+  auto cache = cache_.find(launch_id);
+  if (cache != cache_.end()) {
+    return launch_cached_graph(cache->second, ctx, use_graph_do_while);
   }
 
   // Up-front scan of qd.checkpoint() metadata: counts distinct cp_ids, decides whether any of them yield, picks the SM
@@ -705,9 +790,24 @@ bool GraphManager::try_launch(int launch_id,
 
   allocate_checkpoint_yield_on_slots(cached, ctx, cp_plan);
 
-  if (cached.arg_buffer_size > 0) {
-    CUDADriver::get_instance().memcpy_host_to_device(cached.persistent_device_arg_buffer, ctx.get_context().arg_buffer,
-                                                     cached.arg_buffer_size);
+  for (std::size_t offset = 0; offset < cached.arg_buffer_size; offset += kLaunchWriteSize) {
+    append_launch_destination(cached, cached.persistent_device_arg_buffer + offset);
+  }
+  if (use_graph_do_while) {
+    for (void *slot : cached.counter_ptr_slots) {
+      append_launch_destination(cached, slot);
+    }
+  }
+  if (cached.resume_point_dev_ptr) {
+    append_launch_destination(cached, cached.resume_point_dev_ptr);
+  }
+  if (cached.yield_signal_dev_ptr) {
+    append_launch_destination(cached, cached.yield_signal_dev_ptr);
+  }
+  for (void *slot : cached.checkpoint_yield_on_ptr_slots) {
+    if (slot) {
+      append_launch_destination(cached, slot);
+    }
   }
 
   // --- Build CUDA graph ---
@@ -733,8 +833,8 @@ bool GraphManager::try_launch(int launch_id,
   //
   // The recursive builder (build_level) places direct/checkpoint/child/condition nodes from the
   // per-task level + checkpoint tags. The non-nested / no-checkpoint cases are special cases of it.
-  void *graph = nullptr;
-  CUDADriver::get_instance().graph_create(&graph, 0);
+  CUDADriver::get_instance().graph_create(&cached.graph, 0);
+  void *graph = cached.graph;
 
   if (use_graph_do_while) {
     ensure_condition_kernel_loaded();
@@ -760,13 +860,6 @@ bool GraphManager::try_launch(int launch_id,
       ensure_cond_with_yield_kernel_loaded();
       QD_ASSERT(cond_with_yield_kernel_func_);
     }
-    // Initialise each level's indirection slot with this launch's resolved flag pointer (refreshed on every relaunch in
-    // launch_cached_graph).
-    for (size_t level = 0; level < ctx.graph_do_while_levels.size(); level++) {
-      QD_ASSERT(ctx.graph_do_while_levels[level].flag_dev_ptr);
-      void *flag_ptr = ctx.graph_do_while_levels[level].flag_dev_ptr;
-      CUDADriver::get_instance().memcpy_host_to_device(cached.counter_ptr_slots[level], &flag_ptr, sizeof(void *));
-    }
   }
 
   // Recursively build the graph from the per-task level + checkpoint tags. build_level wraps each contiguous same-cp_id
@@ -779,13 +872,21 @@ bool GraphManager::try_launch(int launch_id,
   cp_id_storage_.reserve(cp_plan.num_distinct_checkpoints + 1);
   std::size_t total_nodes = 0;
   std::vector<unsigned long long> cond_handles(ctx.graph_do_while_levels.size(), 0);
-  build_level(/*parent_id=*/-1, graph, 0, (int)offloaded_tasks.size(), offloaded_tasks, ctx.graph_do_while_levels,
-              cond_handles, cuda_module, cached, total_nodes);
+  void *launch_state_tail = nullptr;
+  if (!cached.launch_states.empty()) {
+    ensure_launch_state_kernel_loaded();
+    for (auto &state : cached.launch_states) {
+      void *kernel_params[] = {&state};
+      launch_state_tail = add_kernel_node(graph, launch_state_tail, launch_state_kernel_func_, 1,
+                                          kGraphLaunchWriteCapacity, 0, kernel_params);
+      cached.launch_state_nodes.push_back(launch_state_tail);
+    }
+  }
+  build_level(/*parent_id=*/-1, graph, launch_state_tail, 0, (int)offloaded_tasks.size(), offloaded_tasks,
+              ctx.graph_do_while_levels, cond_handles, cuda_module, cached, total_nodes);
 
   // --- Instantiate ---
   CUDADriver::get_instance().graph_instantiate(&cached.graph_exec, graph, nullptr, nullptr, 0);
-
-  CUDADriver::get_instance().graph_destroy(graph);
 
   cached.num_nodes = total_nodes;
 
@@ -794,9 +895,7 @@ bool GraphManager::try_launch(int launch_id,
 
   ++total_builds_;
   auto [cache_it, _inserted] = cache_.emplace(launch_id, std::move(cached));
-  // First launch goes through the same code path as every subsequent launch so the yield_signal read-back (and any
-  // other per-launch bookkeeping) doesn't have to be duplicated. Slightly redundant memcpys for arg buffer / counter
-  // slot, but those happen once per graph build and are well under a microsecond each.
+  // First launch uses the same parameter update and replay path as every subsequent launch.
   return launch_cached_graph(cache_it->second, ctx, use_graph_do_while);
 }
 

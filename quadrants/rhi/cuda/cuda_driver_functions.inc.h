@@ -87,6 +87,7 @@ PER_CUDA_FUNCTION(graph_instantiate, cuGraphInstantiate, void **, void *, void *
 PER_CUDA_FUNCTION(graph_launch, cuGraphLaunch, void *, void *);
 PER_CUDA_FUNCTION(graph_destroy, cuGraphDestroy, void *);
 PER_CUDA_FUNCTION(graph_exec_destroy, cuGraphExecDestroy, void *);
+PER_CUDA_FUNCTION(graph_exec_kernel_node_set_params, cuGraphExecKernelNodeSetParams, void *, void *, const void *);
 PER_CUDA_FUNCTION(graph_conditional_handle_create, cuGraphConditionalHandleCreate, void *, void *, void *, uint32, uint32);
 
 // JIT linker (for loading condition kernel with cudadevrt)

@@ -288,6 +288,46 @@ def test_graph_changed_args(tensor_type):
     assert np.allclose(y1_np, 4.0), f"y1 should be unchanged, got {y1_np[:5]}"
 
 
+@test_utils.test(arch=[qd.cuda])
+def test_graph_queued_launches_keep_their_arguments():
+    spin_iterations = 1_000_000
+
+    @qd.kernel
+    def delay(state: qd.types.ndarray(dtype=qd.i32, ndim=1)):
+        qd.loop_config(block_dim=1)
+        for _ in range(1):
+            value = state[0]
+            for _iteration in range(spin_iterations):
+                value = (1664525 * value + 1013904223) % 2147483647
+            state[0] = value
+
+    @qd.kernel(graph=True)
+    def store(output: qd.types.ndarray(dtype=qd.i32, ndim=1), value: qd.i32):
+        for index in range(1):
+            output[index] = value
+
+    warmup = qd.ndarray(qd.i32, shape=(1,))
+    store(warmup, -1)
+    qd.sync()
+
+    state = qd.ndarray(qd.i32, shape=(1,))
+    outputs = [qd.ndarray(qd.i32, shape=(1,)) for _ in range(32)]
+    stream = qd.create_stream()
+    delay(state, qd_stream=stream)
+
+    program = impl.get_runtime().prog
+    program.set_current_cuda_stream(stream.handle)
+    try:
+        for value, output in enumerate(outputs):
+            store(output, value)
+    finally:
+        program.set_current_cuda_stream(0)
+
+    stream.synchronize()
+    stream.destroy()
+    assert [int(output.to_numpy()[0]) for output in outputs] == list(range(32))
+
+
 @pytest.mark.parametrize("tensor_type", [qd.ndarray, qd.field])
 @test_utils.test()
 def test_graph_different_sizes(tensor_type):

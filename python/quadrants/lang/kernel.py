@@ -724,8 +724,8 @@ class Kernel(FuncBase):
                     _checkpoint_helpers.forward_yield_on_table_to_ctx(self, launch_ctx)
                 # `_resume_from_checkpoint` is `None` for fresh launches (host-side default 0 in
                 # `LaunchContextBuilder`, which means "run every checkpoint"). When `Kernel.resume` plumbs an int
-                # through, copy it onto the launch context so the GraphManager's `launch_cached_graph` memcpys it into
-                # the device-side `resume_point` slot instead of clearing to 0. Slice 2 implementation;
+                # through, copy it onto the launch context so the graph-root state upload publishes it to the
+                # device-side `resume_point` slot instead of clearing to 0. Slice 2 implementation;
                 # pre-CUDA-12.4 / non-CUDA backends ignore the value since they don't have a resume_point slot today
                 # (slices 4-6 will add an indirect-dispatch equivalent).
                 if _resume_from_checkpoint is not None:

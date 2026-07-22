@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "quadrants/codegen/llvm/compiled_kernel_data.h"
+#include "quadrants/runtime/cuda/graph_launch_state.h"
 #include "quadrants/runtime/llvm/llvm_runtime_executor.h"
 
 namespace quadrants::lang {
@@ -65,6 +66,9 @@ struct GraphNodeParams {
 static_assert(sizeof(GraphNodeParams) == 256, "GraphNodeParams layout must match CUgraphNodeParams (256 bytes)");
 
 struct CachedGraph {
+  // Keep the source graph alive because cuGraphExecKernelNodeSetParams identifies
+  // executable nodes through their corresponding source-graph node handles.
+  void *graph{nullptr};
   // CUgraphExec handle (typed as void* since driver API is loaded dynamically).
   // This is the instantiated, launchable form of the captured CUDA graph.
   void *graph_exec{nullptr};
@@ -73,6 +77,8 @@ struct CachedGraph {
   RuntimeContext persistent_ctx{};
   std::size_t arg_buffer_size{0};
   std::size_t result_buffer_size{0};
+  std::vector<GraphLaunchState> launch_states;
+  std::vector<void *> launch_state_nodes;
   // Device-side pointer slots for graph_do_while indirection, one per nested level (indexed by level id). Each holds
   // the address of that level's condition ndarray; the condition kernel reads through its slot, so the ndarray can
   // change between launches without rebuilding the graph. Empty when the kernel has no graph_do_while loop. The single
@@ -84,14 +90,11 @@ struct CachedGraph {
   // graph_nested_design.md R1). Only allocated for kernels that have at least one nested graph_do_while level.
   void *const_one_dev{nullptr};
   void *const_one_slot{nullptr};
-  // Framework-internal `resume_point` scalar (one int32 on device) read by every checkpoint gate kernel at launch time.
-  // `nullptr` when the kernel has no `qd.checkpoint()` blocks. Initialised to `0` so all checkpoints run on the first
-  // launch. The yield-check kernel bumps this to INT_MAX when a checkpoint yields, so every later checkpoint's gate
-  // sees `cp_id >= INT_MAX == false` and skips its body for the rest of the launch. `step.resume(from_checkpoint=cp)`
-  // memcpys the resume cp_id into this slot before relaunching the same cached graph. Lives for the lifetime of the
-  // cached graph.
+  // Framework-internal `resume_point` scalar read as int32 by every checkpoint gate kernel. The graph-root state upload
+  // writes `0` for a fresh launch or the requested checkpoint before any gate can read it. The yield-check kernel bumps
+  // it to INT_MAX when a checkpoint yields, so later checkpoints skip their bodies for the rest of that launch.
   void *resume_point_dev_ptr{nullptr};
-  // Framework-internal `yield_signal` scalar (one int32 on device). `-1` (read as "no yield this launch") on launch;
+  // Framework-internal `yield_signal` scalar read as int32. `-1` means "no yield this launch";
   // the yield-check kernel atomically CASes the first yielding checkpoint's cp_id into this slot. The cond-with-yield
   // kernel reads this slot inside `graph_do_while` bodies to exit the WHILE early on yield. After each launch the host
   // reads this back (synchronously via the launch's cudaStreamSynchronize) so the `GraphStatus` host API can tell the
@@ -100,8 +103,7 @@ struct CachedGraph {
   // Per-checkpoint indirection slots for the user's `yield_on=` ndarray pointer (one entry per checkpoint, indexed by
   // cp_id; `nullptr` for checkpoints without `yield_on=`). Same indirection trick as `counter_ptr_slots`: the slot's
   // device address is baked into the graph (the yield-check kernel reads `*(int32_t**)slot`), but the pointer it holds
-  // is re-memcpy'd from the host each launch to follow the current user ndarray. Lives for the lifetime of the cached
-  // graph.
+  // is published by the graph-root state upload each launch to follow the current user ndarray.
   std::vector<void *> checkpoint_yield_on_ptr_slots;
   // Per-checkpoint count (number of distinct cp_ids in this kernel's offloaded_tasks). Stored here so test
   // introspection can see whether the graph build actually emitted IF nodes. `0` for kernels without checkpoints.
@@ -172,6 +174,7 @@ class GraphManager {
                                 const std::vector<std::pair<int, Callable::Parameter>> &parameters,
                                 LlvmRuntimeExecutor *executor);
   void ensure_condition_kernel_loaded();
+  void ensure_launch_state_kernel_loaded();
   void ensure_cond_with_yield_kernel_loaded();
   void ensure_checkpoint_gate_kernel_loaded();
   void ensure_checkpoint_yield_check_kernel_loaded();
@@ -222,6 +225,7 @@ class GraphManager {
   // accumulates the node count for cache bookkeeping.
   void build_level(int parent_id,
                    void *target_graph,
+                   void *prev_node,
                    int begin,
                    int end,
                    const std::vector<OffloadedTask> &tasks,
@@ -250,6 +254,11 @@ class GraphManager {
   // API.
   int last_yield_cp_id_on_last_call_{-1};
   std::size_t total_builds_{0};
+
+  // One generic root kernel publishes each replay's arguments and mutable
+  // checkpoint state before any cached work node can read them.
+  void *launch_state_kernel_module_{nullptr};  // CUmodule
+  void *launch_state_kernel_func_{nullptr};    // CUfunction
 
   // JIT-compiled condition kernel for graph_do_while conditional nodes
   void *cond_kernel_module_{nullptr};  // CUmodule

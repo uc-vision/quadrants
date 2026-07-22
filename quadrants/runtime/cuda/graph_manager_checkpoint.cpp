@@ -220,8 +220,8 @@ void GraphManager::allocate_checkpoint_yield_on_slots(CachedGraph &cached,
                                                       const CheckpointBuildPlan &plan) {
   // Pre-size the per-checkpoint ptr-slot table to (max_cp_id + 1) so we can index by cp_id directly. Slots for
   // checkpoints without `yield_on=` stay `nullptr` and are skipped at launch time. Only allocate when this graph
-  // actually has yield-bearing checkpoints -- otherwise the table stays empty and `launch_cached_graph`'s memcpy loop
-  // iterates zero times.
+  // actually has yield-bearing checkpoints -- otherwise the table stays empty and the graph-root state upload has no
+  // checkpoint pointer slots to publish.
   if (!(plan.has_yield && plan.max_cp_id >= 0)) {
     return;
   }
@@ -230,9 +230,6 @@ void GraphManager::allocate_checkpoint_yield_on_slots(CachedGraph &cached,
     if (ctx.checkpoint_yield_on_dev_ptrs[cp]) {
       void *slot = nullptr;
       CUDADriver::get_instance().malloc(&slot, sizeof(void *));
-      // Initial pointer write -- subsequent launches re-memcpy via launch_cached_graph.
-      void *user_ptr = ctx.checkpoint_yield_on_dev_ptrs[cp];
-      CUDADriver::get_instance().memcpy_host_to_device(slot, &user_ptr, sizeof(void *));
       cached.checkpoint_yield_on_ptr_slots[cp] = slot;
     }
   }
