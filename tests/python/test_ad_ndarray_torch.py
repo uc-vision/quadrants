@@ -192,6 +192,28 @@ def test_tape_torch_tensor_grad_none():
 
 
 @test_utils.test(require=qd.extension.adstack)
+def test_primal_kernel_does_not_allocate_torch_grad():
+    @qd.kernel
+    def copy(x: qd.types.ndarray(), y: qd.types.ndarray()):
+        for i in x:
+            y[i] = x[i]
+
+    device = "cuda" if qd.lang.impl.current_cfg().arch == qd.cuda else "cpu"
+    x = torch.ones(4, device=device, requires_grad=True)
+    y = torch.zeros(4, device=device, requires_grad=True)
+
+    copy(x, y)
+
+    assert x.grad is None
+    assert y.grad is None
+
+    y.grad = torch.ones_like(y)
+    copy.grad(x, y)
+
+    assert torch.equal(x.grad, torch.ones_like(x))
+
+
+@test_utils.test(require=qd.extension.adstack)
 def test_tensor_shape():
     N = 3
 

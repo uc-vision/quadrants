@@ -572,6 +572,7 @@ class FuncBase:
         index: int,
         actual_argument_slot: int,
         callbacks: list[Callable[[], Any]],
+        allocate_grad: bool,
     ) -> tuple[int, bool]:
         """
         This function processes all the input python-side arguments of a given kernel so as to add them to the current
@@ -673,6 +674,7 @@ class FuncBase:
                         index + idx,
                         actual_argument_slot,
                         callbacks,
+                        allocate_grad,
                     )
                     idx += num_args_
                 return idx, True
@@ -700,6 +702,7 @@ class FuncBase:
                     index + idx,
                     actual_argument_slot,
                     callbacks,
+                    allocate_grad,
                 )
                 idx += num_args_
                 is_launch_ctx_cacheable &= is_launch_ctx_cacheable_
@@ -782,22 +785,21 @@ class FuncBase:
                         )
                     quadrants_arch = impl.current_cfg().arch
 
-                    # FIXME: only allocate when launching grad kernel
-                    if v.requires_grad and v.grad is None:
+                    if allocate_grad and v.requires_grad and v.grad is None:
                         v.grad = torch.zeros_like(v)
 
-                    if v.requires_grad:
-                        if not isinstance(v.grad, torch.Tensor):
+                    grad = v.grad
+                    if grad is not None:
+                        if not isinstance(grad, torch.Tensor):
                             raise ValueError(
-                                f"Expecting torch.Tensor for gradient tensor, but getting {v.grad.__class__.__name__} instead"
+                                f"Expecting torch.Tensor for gradient tensor, but getting {grad.__class__.__name__} instead"
                             )
-                        if not v.grad.is_contiguous():
+                        if not grad.is_contiguous():
                             raise ValueError(
                                 "Non contiguous gradient tensors are not supported, please call tensor.grad.contiguous() "
                                 "before passing it into quadrants kernel."
                             )
 
-                    grad = v.grad
                     if (v.device.type != "cpu") and not (v.device.type == "cuda" and quadrants_arch == _arch_cuda):
                         # For a torch tensor to be passed as as input argument (in and/or out) of a quadrants kernel, its
                         # memory must be hosted either on CPU, or on CUDA if and only if Quadrants is using CUDA backend.

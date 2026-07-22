@@ -647,6 +647,7 @@ class Kernel(FuncBase):
                     i_out - template_num,
                     actual_argument_slot,
                     callbacks,
+                    self.autodiff_mode == AutodiffMode.REVERSE,
                 )
                 i_out += num_args_
                 is_launch_ctx_cacheable &= is_launch_ctx_cacheable_
