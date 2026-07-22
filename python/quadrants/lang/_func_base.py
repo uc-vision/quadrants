@@ -790,10 +790,6 @@ class FuncBase:
 
                     grad = v.grad
                     if grad is not None:
-                        if not isinstance(grad, torch.Tensor):
-                            raise ValueError(
-                                f"Expecting torch.Tensor for gradient tensor, but getting {grad.__class__.__name__} instead"
-                            )
                         if not grad.is_contiguous():
                             raise ValueError(
                                 "Non contiguous gradient tensors are not supported, please call tensor.grad.contiguous() "

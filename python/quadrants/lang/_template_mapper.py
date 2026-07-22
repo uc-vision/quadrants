@@ -5,9 +5,8 @@ from weakref import ReferenceType
 from quadrants.lang import impl
 from quadrants.lang.impl import Program
 from quadrants.lang.kernel_arguments import ArgMetadata
-from quadrants.lang.matrix import MatrixType
 from quadrants.lang.util import is_data_oriented
-from quadrants.types import ndarray_type
+from quadrants.types import ndarray_type, primitive_types
 
 from .._test_tools import warnings_helper
 from ._external_tensor import (
@@ -78,7 +77,10 @@ class TemplateMapper:
             annotation = argument.annotation
             if type(annotation) is not ndarray_type.NdarrayType:
                 continue
-            element_dimensions = annotation.dtype.ndim if isinstance(annotation.dtype, MatrixType) else 0
+            element_type = annotation.dtype
+            element_dimensions = 0
+            if element_type is not None and id(element_type) not in primitive_types.type_ids:
+                element_dimensions = element_type.ndim
             external_tensor_specialization_slots.append(
                 ExternalTensorSpecializationSlot(
                     argument_index=argument_index,
