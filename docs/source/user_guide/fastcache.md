@@ -101,13 +101,16 @@ Fastcache supports the following parameter types:
 | `qd.types.NDArray` (scalar, vector, matrix) | Yes | dtype, ndim, layout |
 | `torch.Tensor` | Yes | dtype, ndim |
 | `numpy.ndarray` | Yes | dtype, ndim |
-| Runtime `qd.Matrix` / `qd.Vector` | Yes | dtype, shape |
+| Direct runtime `qd.Matrix` / `qd.Vector` argument | Yes | dtype, shape |
 | [`dataclasses.dataclass`](compound_types.md#dataclassesdataclass) | Yes | member types recursively; member values if annotated with `FIELD_METADATA_CACHE_VALUE` (see [Appendix - compound-type cache keying](#compound-type-cache-keying)) |
 | [`@qd.data_oriented`](compound_types.md#qddata_oriented) objects | Yes | member types recursively; primitive member types and values baked into kernel, unless declared `template_primitives=False`, in which case primitive members contribute their *type* only (see [Appendix - compound-type cache keying](#compound-type-cache-keying)) |
 | `qd.Template` primitives (int, float, bool) | Yes | type and value (baked into kernel) |
 | Non-template primitives (int, float, bool) | Yes | type only |
 | `enum.Enum` | Yes | name and value |
 | `qd.field` / [`ScalarField`](matrix_vector.md#vector-and-matrix-fields) / [`MatrixField`](matrix_vector.md#vector-and-matrix-fields) | **No** | - |
+
+`qd.Matrix` and `qd.Vector` values nested inside template or compound-container arguments are not eligible for
+fastcache. Pass them as directly declared runtime matrix arguments instead.
 
 If any parameter is of an unsupported type, fastcache is disabled for that call and the kernel falls back to normal compilation. For `qd.field` / [`ScalarField`](matrix_vector.md#vector-and-matrix-fields) / [`MatrixField`](matrix_vector.md#vector-and-matrix-fields) arriving through a [qd.Tensor](tensor.md)-annotated parameter, this is silent - no warning is emitted. For other unsupported types, a warning is logged at the `warn` level identifying the offending parameter.
 

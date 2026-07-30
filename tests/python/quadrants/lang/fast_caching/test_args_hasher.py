@@ -211,15 +211,17 @@ def test_args_hasher_ndarray_matrix() -> None:
 
 
 @pytest.mark.parametrize(
-    "base,same_type,different_dtype,different_shape",
+    "annotation,base,same_type,different_dtype,different_shape",
     [
         (
+            qd.types.vector(2, qd.f32),
             qd.Vector([1, 2], dt=qd.f32),
             qd.Vector([3, 4], dt=qd.f32),
             qd.Vector([1, 2], dt=qd.f64),
             qd.Vector([1, 2, 3], dt=qd.f32),
         ),
         (
+            qd.types.matrix(2, 2, qd.f32),
             qd.Matrix([[1, 2], [3, 4]], dt=qd.f32),
             qd.Matrix([[5, 6], [7, 8]], dt=qd.f32),
             qd.Matrix([[1, 2], [3, 4]], dt=qd.f64),
@@ -229,17 +231,42 @@ def test_args_hasher_ndarray_matrix() -> None:
 )
 @test_utils.test()
 def test_args_hasher_runtime_matrix(
+    annotation: object,
     base: qd.Matrix,
     same_type: qd.Matrix,
     different_dtype: qd.Matrix,
     different_shape: qd.Matrix,
 ) -> None:
     h = args_hasher.hash_args
-    base_hash = h(False, [base], [None])
-    assert base_hash == h(False, [same_type], [None])
-    assert base_hash != h(False, [different_dtype], [None])
-    assert base_hash != h(False, [different_shape], [None])
+    metadata = ArgMetadata(annotation, "")
+    base_hash = h(False, [base], [metadata])
+    assert base_hash == h(False, [same_type], [metadata])
+    assert base_hash != h(False, [different_dtype], [metadata])
+    assert base_hash != h(False, [different_shape], [metadata])
     assert h(False, [base], [ArgMetadata(qd.template(), "")]) is FastcacheSkip.WARN
+
+
+@test_utils.test()
+def test_args_hasher_runtime_matrix_data_oriented_member_rejected() -> None:
+    @qd.data_oriented(template_primitives=False)
+    class Parameters:
+        def __init__(self, offset):
+            self.offset = offset
+
+    metadata = ArgMetadata(qd.template(), "")
+    for offset in (qd.Vector([1, 2]), qd.Vector([3, 4])):
+        assert args_hasher.hash_args(False, [Parameters(offset)], [metadata]) is FastcacheSkip.WARN
+
+
+@test_utils.test()
+def test_args_hasher_runtime_matrix_dataclass_member_rejected() -> None:
+    @dataclasses.dataclass
+    class Parameters:
+        offset: qd.Matrix
+
+    for metadata in (ArgMetadata(Parameters, ""), ArgMetadata(qd.template(), "")):
+        for offset in (qd.Vector([1, 2]), qd.Vector([3, 4])):
+            assert args_hasher.hash_args(False, [Parameters(offset)], [metadata]) is FastcacheSkip.WARN
 
 
 def _qd_init_same_arch() -> None:

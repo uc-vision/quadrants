@@ -14,7 +14,7 @@ from quadrants.types.annotations import Template
 from .._ndarray import ScalarNdarray
 from ..field import ScalarField
 from ..kernel_arguments import ArgMetadata
-from ..matrix import Matrix, MatrixField, MatrixNdarray, VectorNdarray
+from ..matrix import Matrix, MatrixField, MatrixNdarray, MatrixType, VectorNdarray
 from ..util import is_data_oriented, wants_runtime_primitives
 from .hash_utils import hash_iterable_strings
 
@@ -159,7 +159,7 @@ def stringify_obj_type(
     if isinstance(obj, VectorNdarray):
         return f"[ndv-{obj.n}-{obj.dtype}-{len(obj.shape)}{_layout_tag}]"  # type: ignore[arg-type]
     if isinstance(obj, Matrix):
-        if _is_template(arg_meta):
+        if arg_meta is None or not isinstance(arg_meta.annotation, MatrixType):
             _mark_should_warn()
             return None
         return f"[matrix-{np.asarray(obj.to_numpy()).dtype}-{obj.get_shape()}]"
