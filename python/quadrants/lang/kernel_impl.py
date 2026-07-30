@@ -213,7 +213,12 @@ def _kernel_impl(
 # TODO: This callable should be Callable[[F], F].
 # See comments below.
 def kernel(
-    _fn: None = None, *, pure: bool = False, graph: bool = False, checkpoints: bool = False
+    _fn: None = None,
+    *,
+    pure: bool = False,
+    fastcache: bool = False,
+    graph: bool = False,
+    checkpoints: bool = False,
 ) -> Callable[[Any], Any]: ...
 
 
@@ -224,7 +229,14 @@ def kernel(
 # However, by making it return Any, we can make the pure parameter
 # change now, without breaking pyright.
 @overload
-def kernel(_fn: Any, *, pure: bool = False, graph: bool = False, checkpoints: bool = False) -> Any: ...
+def kernel(
+    _fn: Any,
+    *,
+    pure: bool = False,
+    fastcache: bool = False,
+    graph: bool = False,
+    checkpoints: bool = False,
+) -> Any: ...
 
 
 def kernel(
