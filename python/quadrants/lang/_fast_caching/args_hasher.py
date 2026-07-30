@@ -172,7 +172,7 @@ def stringify_obj_type(
     if isinstance(obj, MatrixNdarray):
         return f"[ndm-{obj.m}-{obj.n}-{obj.dtype}-{len(obj.shape)}{_layout_tag}]"  # type: ignore[arg-type]
     if isinstance(obj, torch_type):
-        return f"[pt-{obj.dtype}-{obj.ndim}]"  # type: ignore
+        return f"[pt-{obj.dtype}-{obj.ndim}-{obj.requires_grad}]"  # type: ignore
     if isinstance(obj, np.ndarray):
         return f"[np-{obj.dtype}-{obj.ndim}]"
     if isinstance(obj, MatrixField):

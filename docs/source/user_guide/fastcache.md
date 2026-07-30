@@ -99,7 +99,7 @@ Fastcache supports the following parameter types:
 | Type | Supported | Cache key includes |
 |---|---|---|
 | `qd.types.NDArray` (scalar, vector, matrix) | Yes | dtype, ndim, layout |
-| `torch.Tensor` | Yes | dtype, ndim |
+| `torch.Tensor` | Yes | dtype, ndim, requires_grad |
 | `numpy.ndarray` | Yes | dtype, ndim |
 | Direct runtime `qd.Matrix` / `qd.Vector` argument | Yes | dtype, shape |
 | [`dataclasses.dataclass`](compound_types.md#dataclassesdataclass) | Yes | member types recursively; member values if annotated with `FIELD_METADATA_CACHE_VALUE` (see [Appendix - compound-type cache keying](#compound-type-cache-keying)) |

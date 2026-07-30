@@ -391,6 +391,21 @@ def test_args_hasher_torch_tensor() -> None:
 @pytest.mark.needs_torch
 @pytest.mark.skipif(not has_pytorch(), reason="PyTorch not installed.")
 @test_utils.test()
+def test_args_hasher_torch_tensor_requires_grad() -> None:
+    without_grad = torch.zeros((2, 3), dtype=float)
+    with_grad = torch.zeros((2, 3), dtype=float, requires_grad=True)
+
+    without_grad_hash = args_hasher.hash_args(False, [without_grad], [None])
+    with_grad_hash = args_hasher.hash_args(False, [with_grad], [None])
+
+    assert without_grad_hash is not None
+    assert with_grad_hash is not None
+    assert without_grad_hash != with_grad_hash
+
+
+@pytest.mark.needs_torch
+@pytest.mark.skipif(not has_pytorch(), reason="PyTorch not installed.")
+@test_utils.test()
 def test_args_hasher_custom_torch_tensor() -> None:
     class CustomTensor(torch.Tensor): ...
 

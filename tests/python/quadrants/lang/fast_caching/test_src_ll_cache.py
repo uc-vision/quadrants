@@ -13,8 +13,12 @@ _KERNEL_COVERAGE = os.environ.get("QD_KERNEL_COVERAGE") == "1"
 import quadrants.lang
 from quadrants._test_tools import qd_init_same_arch
 from quadrants.lang._kernel_types import SrcLlCacheObservations
+from quadrants.lang.util import has_pytorch
 
 from tests import test_utils
+
+if has_pytorch():
+    import torch
 
 TEST_RAN = "test ran"
 RET_SUCCESS = 42
@@ -185,6 +189,77 @@ def test_src_ll_cache_repeat_after_load(tmp_path: pathlib.Path) -> None:
     for i in range(3):
         has_pure(a)
         assert a[0] == 6 + i
+
+
+@qd.kernel(fastcache=True)
+def requires_grad_kernel(
+    values: qd.types.ndarray(qd.f32, ndim=1),
+    output: qd.types.ndarray(qd.f32, ndim=1),
+) -> None:
+    output[0] = values[0]
+
+
+class RequiresGradKernelArgs(pydantic.BaseModel):
+    arch: str
+    offline_cache_file_path: str
+    requires_grad: bool
+    expect_cache_hit: bool
+
+
+def src_ll_cache_requires_grad_child(args: list[str]) -> None:
+    args_obj = RequiresGradKernelArgs.model_validate_json(args[0])
+    qd.init(
+        arch=getattr(qd, args_obj.arch),
+        offline_cache=True,
+        offline_cache_file_path=args_obj.offline_cache_file_path,
+        src_ll_cache=True,
+    )
+
+    values = torch.tensor([7.0], requires_grad=args_obj.requires_grad)
+    output = torch.zeros(1)
+    requires_grad_kernel(values, output)
+
+    assert output[0] == 7.0
+    observations = requires_grad_kernel._primal.src_ll_cache_observations
+    assert observations.cache_key_generated
+    assert observations.cache_loaded == args_obj.expect_cache_hit
+    assert observations.cache_validated == args_obj.expect_cache_hit
+    print(TEST_RAN)
+    sys.exit(RET_SUCCESS)
+
+
+@pytest.mark.needs_torch
+@pytest.mark.skipif(not has_pytorch(), reason="PyTorch not installed.")
+@test_utils.test(arch=qd.cpu)
+def test_src_ll_cache_distinguishes_requires_grad(tmp_path: pathlib.Path) -> None:
+    arch = qd.lang.impl.current_cfg().arch.name
+    env = dict(os.environ)
+    env["PYTHONPATH"] = "."
+
+    for requires_grad, expect_cache_hit in [(True, False), (False, False), (False, True), (True, True)]:
+        args_obj = RequiresGradKernelArgs(
+            arch=arch,
+            offline_cache_file_path=str(tmp_path),
+            requires_grad=requires_grad,
+            expect_cache_hit=expect_cache_hit,
+        )
+        proc = subprocess.run(
+            [
+                sys.executable,
+                __file__,
+                src_ll_cache_requires_grad_child.__name__,
+                args_obj.model_dump_json(),
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != RET_SUCCESS:
+            print(proc.stdout)
+            print("-" * 100)
+            print(proc.stderr)
+        assert TEST_RAN in proc.stdout
+        assert proc.returncode == RET_SUCCESS
 
 
 @pytest.mark.parametrize("src_ll_cache", [None, False, True])
