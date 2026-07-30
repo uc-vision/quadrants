@@ -210,6 +210,38 @@ def test_args_hasher_ndarray_matrix() -> None:
                             assert hash in seen
 
 
+@pytest.mark.parametrize(
+    "base,same_type,different_dtype,different_shape",
+    [
+        (
+            qd.Vector([1, 2], dt=qd.f32),
+            qd.Vector([3, 4], dt=qd.f32),
+            qd.Vector([1, 2], dt=qd.f64),
+            qd.Vector([1, 2, 3], dt=qd.f32),
+        ),
+        (
+            qd.Matrix([[1, 2], [3, 4]], dt=qd.f32),
+            qd.Matrix([[5, 6], [7, 8]], dt=qd.f32),
+            qd.Matrix([[1, 2], [3, 4]], dt=qd.f64),
+            qd.Matrix([[1, 2, 3], [4, 5, 6]], dt=qd.f32),
+        ),
+    ],
+)
+@test_utils.test()
+def test_args_hasher_runtime_matrix(
+    base: qd.Matrix,
+    same_type: qd.Matrix,
+    different_dtype: qd.Matrix,
+    different_shape: qd.Matrix,
+) -> None:
+    h = args_hasher.hash_args
+    base_hash = h(False, [base], [None])
+    assert base_hash == h(False, [same_type], [None])
+    assert base_hash != h(False, [different_dtype], [None])
+    assert base_hash != h(False, [different_shape], [None])
+    assert h(False, [base], [ArgMetadata(qd.template(), "")]) is FastcacheSkip.WARN
+
+
 def _qd_init_same_arch() -> None:
     assert qd.cfg is not None
     qd.init(arch=getattr(qd, qd.cfg.arch.name))
